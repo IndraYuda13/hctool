@@ -357,9 +357,9 @@ def normalize_psiphon(index: int, value) -> object:
 def normalize_value(value, raw_seg: str):
     # Nilai yang mayoritas non-printable = sisa keystream / blob, bukan data;
     # aplikasi menampilkan slot seperti ini sebagai kosong.
-    if isinstance(value, str) and value:
-        if sum(1 for c in value if c.isprintable()) / len(value) < 0.9:
-            return ""
+    # CATATAN: \r \n \t dihitung "bisa dicetak" (JSON/HTML multi-baris sah).
+    if isinstance(value, str) and value and not _meaningful_text(value):
+        return ""
     if not isinstance(value, str) or not is_hex_field(raw_seg):
         return value
     for tok in ENUM_TOKENS:
@@ -514,6 +514,16 @@ class HcConfig:
             return bool(v.get("subformat"))
         return True
 
+    @staticmethod
+    def _maybe_json(v):
+        """String yang isinya JSON object/array -> dict/list (biar rapi)."""
+        if isinstance(v, str) and v[:1] in ("{", "["):
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return v
+        return v
+
     def to_dict(self, full: bool = False, include_raw: bool = False) -> dict:
         """Struktur seperti aplikasi:
               {"config": {...}, "protections": {...}, "metadata": {...}}
@@ -525,9 +535,9 @@ class HcConfig:
         cfg: Dict[str, object] = {}
         for k, v in self.slots.items():
             if full:
-                cfg[k] = v
+                cfg[k] = self._maybe_json(v)
             elif k in self.KEEP_EMPTY or self._meaningful(v):
-                cfg[k] = v
+                cfg[k] = self._maybe_json(v)
         out: Dict[str, object] = {
             "config": cfg,
             "protections": dict(self.protections),
