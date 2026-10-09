@@ -761,6 +761,115 @@ def _self_test() -> int:
     return rc
 
 
+def dump_layers(source, max_bytes: int = 400) -> dict:
+    """Bongkar .hc LAPIS PER LAPIS dan kembalikan tiap level untuk audit.
+
+    Level:
+      0_raw_file        : isi file apa adanya (UTF-8, karakter ter-XOR)
+      1_xor             : hasil XOR kunci luar (harus ASCII hex)
+      2_ciphertext      : hasil hex-decode
+      3_outer_json      : plaintext ChaCha20 = JSON luar (masih terenkripsi)
+      4_outer_fields    : field luar yang sudah dibuka (key #7)
+      5_slot_stream     : stream 32 slot (key #1) - teks ber-delimiter
+      6_slots           : 32 segmen + hasil dekode tiap slot
+    """
+    raw = (bytes(source) if isinstance(source, (bytes, bytearray))
+           else open(source, "rb").read())
+    layers: Dict[str, object] = {}
+
+    layers["0_raw_file"] = {
+        "size_bytes": len(raw),
+        "is_ascii_json": raw[:1] in (b"{", b"["),
+        "first_bytes_hex": raw[:48].hex(),
+        "note": "file = karakter UTF-8 ter-XOR; BUKAN JSON",
+    }
+
+    text = raw.decode("utf-8", "replace")
+    hexed = bytes((ord(ch) & 0xFF) ^ XOR_KEY[i % 11]
+                  for i, ch in enumerate(text))
+    layers["1_xor"] = {
+        "xor_key": XOR_KEY.hex(),
+        "all_ascii_hex": all(chr(c) in "0123456789abcdef" for c in hexed),
+        "preview": hexed[:max_bytes].decode("ascii", "replace"),
+    }
+
+    hexstr = bytes(c for c in hexed if chr(c) in "0123456789abcdef")
+    ct = bytes.fromhex(hexstr[: len(hexstr) // 2 * 2].decode())
+    layers["2_ciphertext"] = {
+        "size_bytes": len(ct),
+        "algo": "ChaCha20 legacy (nonce 8B, block counter 1)",
+        "key_index": KEY_CONTAINER,
+        "key_hex": CHACHA_KEYS[KEY_CONTAINER].hex(),
+        "nonce_hex": STATIC_NONCE.hex(),
+        "first_bytes_hex": ct[:48].hex(),
+    }
+
+    plain = _chacha(ct, CHACHA_KEYS[KEY_CONTAINER])
+    outer = _json_outer(plain)
+    layers["3_outer_json"] = {
+        "size_bytes": len(plain),
+        "is_json": True,
+        "structure": {k: (list(v) if isinstance(v, dict) else f"<{len(v)} chars>")
+                      for k, v in outer.items()},
+        "raw_preview": plain[:max_bytes].decode("utf-8", "replace"),
+    }
+
+    a = outer["a"]
+    fields = {}
+    for k, v in a.items():
+        if k == "xy" or not is_hex_field(v):
+            fields[k] = {"hex": v, "plain": None}
+            continue
+        fields[k] = {
+            "hex_len": len(v),
+            "plain": printable_prefix(
+                _field_plain(v, CHACHA_KEYS[KEY_META])
+            ).decode("ascii", "replace"),
+            "key_index": KEY_META,
+        }
+    b = outer.get("b")
+    vercfg = None
+    if isinstance(b, str) and is_hex_field(b):
+        vercfg = printable_prefix(
+            _field_plain(b, CHACHA_KEYS[KEY_META])).decode("ascii", "replace")
+    layers["4_outer_fields"] = {
+        "fields": fields,
+        "verCfg": vercfg,
+        "source_url": None,
+        "note": "a.uv = delimiter slot (dipakai apa adanya)",
+    }
+
+    stream = _chacha(bytes.fromhex(a["xy"]), CHACHA_KEYS[KEY_SLOTS],
+                     STATIC_NONCE, 1)
+    segs = stream.decode("latin-1").split(a["uv"])
+    if len(segs) == len(SLOT_NAMES) + 1 and segs[-1] == "":
+        segs = segs[:-1]
+    layers["5_slot_stream"] = {
+        "key_index": KEY_SLOTS,
+        "size_bytes": len(stream),
+        "delimiter": a["uv"],
+        "segments": len(segs),
+        "preview": stream[:max_bytes].decode("latin-1", "replace"),
+    }
+
+    cfg = decrypt_hc_file(raw)
+    slot_rows = []
+    for i, name in enumerate(SLOT_NAMES):
+        seg = segs[i] if i < len(segs) else ""
+        slot_rows.append({
+            "index": i,
+            "name": name,
+            "segment_kind": "hex field" if is_hex_field(seg) else "plain text",
+            "segment_len": len(seg),
+            "transforms": cfg.traces.get(name, []),
+            "value": cfg.slots.get(name, ""),
+        })
+    layers["6_slots"] = slot_rows
+    if cfg.source_url:
+        layers["4_outer_fields"]["source_url"] = cfg.source_url
+    return layers
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Dekoder config .hc (HTTP Custom) tanpa aplikasi.")
@@ -770,6 +879,10 @@ def main() -> int:
                     help="sertakan 32 segmen mentah + jejak transformasi")
     ap.add_argument("--full", action="store_true",
                     help="tampilkan seluruh 32 slot (tidak disaring)")
+    ap.add_argument("--layers", action="store_true",
+                    help="dump setiap lapisan (0..6) untuk audit")
+    ap.add_argument("--limit", type=int, default=400,
+                    help="batas byte preview per lapisan saat --layers")
     ap.add_argument("--self-test", action="store_true", help="uji fixture")
     args = ap.parse_args()
 
@@ -778,6 +891,21 @@ def main() -> int:
     if not args.file:
         ap.print_help()
         return 2
+
+    if args.layers:
+        try:
+            data = dump_layers(args.file, max_bytes=args.limit)
+        except (HcError, ValueError, KeyError) as e:
+            sys.stderr.write(f"ERROR: {e}\n")
+            return 1
+        out = json.dumps(data, indent=4, ensure_ascii=False)
+        if args.output:
+            open(args.output, "w", encoding="utf-8").write(out)
+            print(f"-> {args.output}")
+        else:
+            print(out)
+        return 0
+
     try:
         cfg = decrypt_hc_file(args.file)
     except HcError as e:

@@ -64,8 +64,31 @@ python3 hcdecrypt.py config.hc -o out.json      # write to file
 python3 hcdecrypt.py config.hc --full           # all 32 slots, unfiltered
 python3 hcdecrypt.py config.hc --raw            # + raw segments & transform trace
 python3 hcdecrypt.py --self-test                # run built-in fixtures
+python3 hcdecrypt.py config.hc --layers         # dump every layer (0..6)
 python3 hcencrypt.py                            # bit-exact round-trip test
 ```
+
+### Auditing layer by layer (`--layers`)
+
+`--layers` shows exactly what each stage of the pipeline contains, so you can
+see where the JSON actually appears (it is **not** JSON on disk):
+
+```json
+{
+  "0_raw_file":   {"size_bytes": 80888, "is_ascii_json": false,
+                   "first_bytes_hex": "c397c3a4c280..."},
+  "1_xor":        {"xor_key": "e382e4b8adc386f09f9293", "all_ascii_hex": true,
+                   "preview": "4fd436d336b0b8d9..."},
+  "2_ciphertext": {"size_bytes": 20222, "key_index": 5, "nonce_hex": "dbdb..."},
+  "3_outer_json": {"is_json": true, "structure": {"a": ["yz","xy",...], "b": "..."}},
+  "4_outer_fields":{"verCfg": "57", "fields": {"a.uv": {...}, "a.vw": "645"}},
+  "5_slot_stream": {"segments": 32, "delimiter": "b6e418d32ba9f7f2..."},
+  "6_slots":       [{ "index": 26, "name": "v2rayConfig", "segment_kind": "hex field",
+                      "transforms": ["chacha#7", "jkl"], "value": "{...}" }]
+}
+```
+
+Use `--limit N` to cap each layer's preview bytes (default 400).
 
 ### Library
 
