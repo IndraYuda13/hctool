@@ -50,7 +50,7 @@ by field against app-produced ground truth).
 
 ```bash
 pip install pycryptodome
-git clone https://github.com/<user>/hctool.git
+git clone https://github.com/IndraYuda13/hctool.git
 cd hctool
 ```
 
